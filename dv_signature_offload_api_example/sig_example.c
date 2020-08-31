@@ -21,6 +21,14 @@
 /* poll CQ timeout in millisec (2 seconds) */
 #define MAX_POLL_CQ_TIMEOUT 2000
 
+/*
+ * The entry size is 16B. The buffer size must be aligned to 64B.
+ * 64B (list/interleaved entries) + 64B (signature attributes)
+ */
+#define WR_MKEY_CONF_DATA_SIZE 128
+/* It is a HW requirement */
+#define WR_MKEY_CONF_DATA_BUF_ALIGN 2048
+
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 static inline uint64_t htonll(uint64_t x)
 {
@@ -64,6 +72,7 @@ struct config_t {
 	const struct signature_ops *sig;
 	int pipeline;
 	int corrupt_data;
+	int send_inline;
 };
 
 /* structure to exchange data which is needed to connect the QPs */
@@ -116,6 +125,7 @@ struct resources {
 	struct ibv_mr *recv_mr;	/* MR for recv buffer */
 	struct ibv_mr *data_mr;	/* MR for data buffer */
 	struct ibv_mr *pi_mr;	/* MR for protection information buffer */
+	struct ibv_mr *mkey_data_mr;	/* MR for non-inline data of the mkey */
 	struct mlx5dv_mkey *sig_mr;
 
 	char *send_buf;
@@ -123,6 +133,7 @@ struct resources {
 	uint8_t *data_buf;
 	size_t data_buf_size;
 	uint8_t *pi_buf;
+	uint8_t *mkey_data;
 	size_t pi_buf_size;
 	int sock; /* TCP socket file descriptor */
 };
@@ -177,6 +188,7 @@ struct config_t config = {
 	.sig		= &sig_ops[SIG_TYPE_CRC32],
 	.pipeline	= 0,
 	.corrupt_data	= 0,
+	.send_inline	= 1,
 };
 
 static inline int is_server()
@@ -651,20 +663,30 @@ int configure_sig_mkey(struct resources *res,
 	struct ibv_qp_ex *qpx = ibv_qp_to_qp_ex(res->qp);
 	struct mlx5dv_qp_ex *dv_qp = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
 	struct mlx5dv_mkey *mkey = res->sig_mr;
-	struct mlx5dv_mkey_attr mkey_attr = {
-		.access_flags = IBV_ACCESS_LOCAL_WRITE |
+	uint32_t access_flags = IBV_ACCESS_LOCAL_WRITE |
 				IBV_ACCESS_REMOTE_READ |
-				IBV_ACCESS_REMOTE_WRITE,
-	};
+				IBV_ACCESS_REMOTE_WRITE;
+	struct ibv_mr *md_mr;
+	struct mlx5dv_mkey_layout_attr layout_attr = {};
 	struct ibv_sge sge;
 	struct mlx5dv_mr_interleaved mr_interleaved[2];
 
 	ibv_wr_start(qpx);
 	qpx->wr_id = 0;
-	qpx->wr_flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
+	qpx->wr_flags = IBV_SEND_SIGNALED;
+	if (config.send_inline)
+		qpx->wr_flags |= IBV_SEND_INLINE;
 
 	mlx5dv_wr_mkey_configure(dv_qp, mkey, 0);
-	mlx5dv_wr_mkey_set_basic_attr(dv_qp, &mkey_attr);
+	mlx5dv_wr_set_mkey_valid(dv_qp);
+	mlx5dv_wr_set_mkey_access_flags(dv_qp, access_flags);
+	if (!config.send_inline) {
+		md_mr = res->mkey_data_mr;
+		mlx5dv_wr_set_mkey_sge(dv_qp,
+				       md_mr->lkey,
+				       md_mr->addr,
+				       md_mr->length);
+	}
 
 	if ((!res->pi_buf) ||
 	    (mode == SIG_MODE_INSERT) ||
@@ -677,7 +699,11 @@ int configure_sig_mkey(struct resources *res,
 			sge.length = config.block_size * config.nb;
 		else
 			sge.length = res->data_mr->length;
-		mlx5dv_wr_mkey_set_layout_list(dv_qp, 1, &sge);
+
+		mlx5dv_wr_set_mkey_len(dv_qp, sge.length);
+		layout_attr.mkey_layout = MLX5DV_MKEY_LAYOUT_LIST;
+		mlx5dv_wr_set_mkey_layout(dv_qp, &layout_attr);
+		mlx5dv_wr_set_mkey_entries_list(dv_qp, 0, 1, &sge);
 	} else {
 		/* data */
 		mr_interleaved[0].addr = (uintptr_t)res->data_mr->addr;
@@ -690,9 +716,17 @@ int configure_sig_mkey(struct resources *res,
 		mr_interleaved[1].bytes_skip = 0;
 		mr_interleaved[1].lkey = res->pi_mr->lkey;
 
-		mlx5dv_wr_mkey_set_layout_interleaved(dv_qp, config.nb, 2, mr_interleaved);
+                mlx5dv_wr_set_mkey_len(dv_qp,
+				       (config.block_size + config.sig->pi_size) *
+					config.nb);
+		layout_attr.mkey_layout = MLX5DV_MKEY_LAYOUT_LIST_INTERLEAVED;
+		layout_attr.repeat_count = config.nb;
+		layout_attr.num_interleaved = 2;
+		layout_attr.total_byte_count = config.block_size + config.sig->pi_size;
+		mlx5dv_wr_set_mkey_layout(dv_qp, &layout_attr);
+		mlx5dv_wr_set_mkey_entries_interleaved(dv_qp, 0, 2, mr_interleaved);
 	}
-	mlx5dv_wr_mkey_set_sig_block(dv_qp, sig_attr);
+	mlx5dv_wr_set_mkey_sig_block(dv_qp, sig_attr);
 
 	return ibv_wr_complete(qpx);
 }
@@ -802,17 +836,25 @@ static void resources_init(struct resources *res)
 		res->pi_buf_size = config.sig->pi_size * config.nb;
 }
 
-int alloc_and_register_buffer(struct ibv_pd *pd,
-			      size_t size,
-			      void **buf,
-			      struct ibv_mr **mr)
+int alloc_and_register_aligned_buffer(struct ibv_pd *pd,
+				      size_t size,
+				      size_t alignment,
+				      void **buf,
+				      struct ibv_mr **mr)
 {
 	int mr_flags = 0;
+	int err;
 
 	if (!size)
 		return 0;
 
-	*buf = malloc(size);
+	if (!alignment) {
+		*buf = malloc(size);
+	} else {
+		err = posix_memalign(buf, alignment, size);
+		if (err)
+			*buf = NULL;
+	}
 	if (!*buf) {
 		fprintf(stderr, "failed to malloc %Zu bytes to memory buffer\n",
 			size);
@@ -832,6 +874,14 @@ int alloc_and_register_buffer(struct ibv_pd *pd,
 	}
 
 	return 0;
+}
+
+int alloc_and_register_buffer(struct ibv_pd *pd,
+			      size_t size,
+			      void **buf,
+			      struct ibv_mr **mr)
+{
+	return alloc_and_register_aligned_buffer(pd, size, 0, buf, mr);
 }
 
 int set_nonblock_async_event_fd(struct ibv_context *ctx)
@@ -1010,6 +1060,14 @@ static int resources_create(struct resources *res)
 		goto resources_create_exit;
 	}
 
+	rc = alloc_and_register_aligned_buffer(res->pd, WR_MKEY_CONF_DATA_SIZE,
+					       WR_MKEY_CONF_DATA_BUF_ALIGN,
+					       (void **)&res->mkey_data,
+					       &res->mkey_data_mr);
+	if (rc) {
+		goto resources_create_exit;
+	}
+
 	mkey_attr.pd = res->pd;
 	mkey_attr.max_entries = 1;
 	mkey_attr.create_flags = MLX5DV_MKEY_INIT_ATTR_FLAGS_INDIRECT |
@@ -1031,7 +1089,8 @@ static int resources_create(struct resources *res)
 	qp_attr.cap.max_recv_wr = 1;
 	qp_attr.cap.max_send_sge = 1;
 	qp_attr.cap.max_recv_sge = 1;
-	qp_attr.cap.max_inline_data = 512;
+	if (config.send_inline)
+		qp_attr.cap.max_inline_data = 512;
 
 	qp_attr.pd = res->pd;
 	qp_attr.comp_mask = IBV_QP_INIT_ATTR_PD;
@@ -1067,9 +1126,9 @@ resources_create_exit:
 			mlx5dv_destroy_mkey(res->sig_mr);
 			res->sig_mr = NULL;
 		}
-		if (res->pi_mr) {
-			ibv_dereg_mr(res->pi_mr);
-			res->pi_mr = NULL;
+		if (res->mkey_data_mr) {
+			ibv_dereg_mr(res->mkey_data_mr);
+			res->mkey_data_mr = NULL;
 		}
 		if (res->data_mr) {
 			ibv_dereg_mr(res->data_mr);
@@ -1082,6 +1141,10 @@ resources_create_exit:
 		if (res->recv_mr) {
 			ibv_dereg_mr(res->recv_mr);
 			res->recv_mr = NULL;
+		}
+		if (res->mkey_data) {
+			free(res->mkey_data);
+			res->mkey_data = NULL;
 		}
 		if (res->pi_buf) {
 			free(res->pi_buf);
@@ -1377,6 +1440,11 @@ static int resources_destroy(struct resources *res)
 			fprintf(stderr, "failed to deregister mr\n");
 			rc = 1;
 		}
+	if (res->mkey_data_mr)
+		if (ibv_dereg_mr(res->mkey_data_mr)) {
+			fprintf(stderr, "failed to deregister mr\n");
+			rc = 1;
+		}
 	if (res->pi_mr)
 		if (ibv_dereg_mr(res->pi_mr)) {
 			fprintf(stderr, "failed to deregister mr\n");
@@ -1397,6 +1465,8 @@ static int resources_destroy(struct resources *res)
 			fprintf(stderr, "failed to deregister mr\n");
 			rc = 1;
 		}
+	if (res->mkey_data)
+		free(res->mkey_data);
 	if (res->pi_buf)
 		free(res->pi_buf);
 	if (res->data_buf)
@@ -1857,10 +1927,11 @@ int main(int argc, char *argv[])
 			{ .name = "sig-type",		.has_arg = 1, .val = 's' },
 			{ .name = "pipeline",		.has_arg = 0, .val = 'l' },
 			{ .name = "corrupt-data",	.has_arg = 0, .val = 'c' },
+			{ .name = "non-inline",		.has_arg = 0, .val = 'e' },
 			{ .name = NULL,			.has_arg = 0, .val = '\0' }
 		};
 
-		c = getopt_long(argc, argv, "hp:d:i:g:b:n:os:lc", long_options, NULL);
+		c = getopt_long(argc, argv, "hp:d:i:g:b:n:os:lce", long_options, NULL);
 		if (c == -1)
 			break;
 		switch (c) {
@@ -1916,6 +1987,9 @@ int main(int argc, char *argv[])
 			break;
 		case 'c':
 			config.corrupt_data = 1;
+			break;
+		case 'e':
+			config.send_inline = 0;
 			break;
 		default:
 			usage(argv[0]);
