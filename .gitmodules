@@ -1,0 +1,9 @@
+[submodule "gf-complete"]
+	path = gf-complete
+	url = https://github.com/ceph/gf-complete.git
+[submodule "jerasure"]
+	path = jerasure
+	url = https://github.com/tsuraan/Jerasure.git
+[submodule "crc32_offload_api_example"]
+	path = crc32_offload_api_example
+	url = https://github.com/Mellanox/crc32_offload_api_example.git
