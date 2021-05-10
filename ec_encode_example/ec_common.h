@@ -157,4 +157,6 @@ int ec_gold_encode(int *encode_matrix, uint8_t *enc_matrix,
 int alloc_jerasure_buf_comp(struct ec_comp *comp);
 void free_jerasure_buf_comp(struct ec_comp *comp);
 
+#define FILE_SIZE (15ULL << 30)
+
 #endif /* EC_COMMON_H */

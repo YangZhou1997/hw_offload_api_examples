@@ -299,17 +299,22 @@ ec_get_sg(struct ec_mr *data,
     int size = sge * bs;
 
 #ifdef USING_HG
-    data->buf = allocate_hugepage_persistent(size);
+    data->buf = allocate_hugepage_persistent(FILE_SIZE);
 #else
-    data->buf = calloc(1, size);
+    data->buf = calloc(1, FILE_SIZE);
 #endif
+    for(uint64_t i = 0; i < FILE_SIZE; i += 4){
+        *(uint32_t*)&data->buf[i] = rand();
+    }
+
     if (!data->buf) {
         err_log("Failed to allocate data buffer\n");
                 return -ENOMEM;
         }
 
-    data->mr = ibv_reg_mr(pd, data->buf, size, IBV_ACCESS_LOCAL_WRITE);
+    data->mr = ibv_reg_mr(pd, data->buf, FILE_SIZE, IBV_ACCESS_LOCAL_WRITE);
     if (!data->mr) {
+        printf("%d", errno);
         err_log("Failed to allocate data MR\n");
                 goto free_buf;
     }

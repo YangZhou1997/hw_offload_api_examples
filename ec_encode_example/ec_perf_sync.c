@@ -182,6 +182,7 @@ void catch_alarm(int sig)
 	}
 }
 
+double elapsed_time = 0.0;
 static int encode_file(struct encoder_context *ctx)
 {
 	struct ec_context *ec_ctx = ctx->ec_ctx;
@@ -189,8 +190,20 @@ static int encode_file(struct encoder_context *ctx)
 	struct timeval tvalBefore, tvalAfter;
 
 	gettimeofday(&tvalBefore, NULL);
-	gettimeofday(&tvalAfter, NULL);
-	while (tvalAfter.tv_sec - tvalBefore.tv_sec < (long)duration) {
+	// gettimeofday(&tvalAfter, NULL);
+	// while (tvalAfter.tv_sec - tvalBefore.tv_sec < (long)duration) {
+    
+    uint32_t page_size_k = ec_ctx->mem.block_size * ec_ctx->attr.k;
+    uint32_t parity_size_m = ec_ctx->mem.block_size * ec_ctx->attr.m;
+    uint64_t num_pages = FILE_SIZE / page_size_k;
+    for(uint64_t i = 0; i < num_pages; i++){
+        for(int x = 0; x < ec_ctx->attr.k; x++){
+            ec_ctx->mem.data_blocks[x].addr = ec_ctx->data.buf + i * page_size_k + x * ec_ctx->block_size;
+        }
+        for(int x = 0; x < ec_ctx->attr.m; x++){
+            ec_ctx->mem.code_blocks[x].addr = ec_ctx->code.buf + i * parity_size_m + x * ec_ctx->block_size;
+        }
+        
 		if (ctx->sw)
 			err = sw_ec_encode(ctx->ec_ctx->data.buf,
 					   ctx->ec_ctx->code.buf,
@@ -205,9 +218,11 @@ static int encode_file(struct encoder_context *ctx)
 			return err;
 		}
 		ctx->bytes += ec_ctx->block_size * ec_ctx->attr.k;
+    }
+	gettimeofday(&tvalAfter, NULL);
+    elapsed_time = (tvalAfter.tv_sec - tvalBefore.tv_sec) + (tvalAfter.tv_usec - tvalBefore.tv_usec) * 1e-6;
 
-		gettimeofday(&tvalAfter, NULL);
-	}
+	// }
 
 	return 0;
 }
@@ -217,10 +232,12 @@ static void print_report(struct encoder_context *ctx, char* unit)
 	double m_bw, g_bw;
 
 	if (!strcmp(unit, "MBps")) {
-		m_bw = (float)ctx->bytes / duration / 1024 / 1024;
+		// m_bw = (float)ctx->bytes / duration / 1024 / 1024;
+		m_bw = (float)FILE_SIZE / elapsed_time / 1024 / 1024;
 		printf("%lf m_bw\n", m_bw);
 	} else if (!strcmp(unit, "Gbps")) {
-		g_bw = (float)ctx->bytes * 8 / duration / 1000000000;
+		// g_bw = (float)ctx->bytes * 8 / duration / 1000000000;
+		g_bw = (float)FILE_SIZE * 8 / duration / 1000000000;
 		printf("%lf g_bw\n", g_bw);
 	}
 	else
