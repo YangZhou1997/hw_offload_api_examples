@@ -78,7 +78,7 @@ init_ctx(struct ibv_device *ib_dev, struct inargs *in)
 	}
 
 	ctx->ec_ctx = alloc_ec_ctx(ctx->pd, in->frame_size,
-				   in->k, in->m, in->w, in->aff, 1, NULL, NULL, NULL);
+				   in->k, in->m, in->w, in->aff, 64, NULL, NULL, NULL);
 	if (!ctx->ec_ctx) {
 		err_log("Failed to allocate EC context\n");
 		goto dealloc_pd;
@@ -193,16 +193,26 @@ static int encode_file(struct encoder_context *ctx)
 	// gettimeofday(&tvalAfter, NULL);
 	// while (tvalAfter.tv_sec - tvalBefore.tv_sec < (long)duration) {
     
-    uint32_t page_size_k = ec_ctx->mem.block_size * ec_ctx->attr.k;
-    uint32_t parity_size_m = ec_ctx->mem.block_size * ec_ctx->attr.m;
-    uint64_t num_pages = FILE_SIZE / page_size_k;
-    for(uint64_t i = 0; i < num_pages; i++){
-        for(int x = 0; x < ec_ctx->attr.k; x++){
-            ec_ctx->mem.data_blocks[x].addr = ec_ctx->data.buf + i * page_size_k + x * ec_ctx->block_size;
-        }
-        for(int x = 0; x < ec_ctx->attr.m; x++){
-            ec_ctx->mem.code_blocks[x].addr = ec_ctx->code.buf + i * parity_size_m + x * ec_ctx->block_size;
-        }
+    uint64_t page_size_k = ec_ctx->mem.block_size * ec_ctx->attr.k;
+    uint64_t parity_size_m = ec_ctx->mem.block_size * ec_ctx->attr.m;
+    if(FILE_SIZE % page_size_k != 0){
+        printf("FILE_SIZE errors\n");
+        exit(0);
+    }
+    uint64_t num_iters = FILE_SIZE / page_size_k;
+    for(uint64_t i = 0; i < num_iters; i++){
+        // for(int x = 0; x < ec_ctx->attr.k; x++){
+        //     // ec_ctx->mem.data_blocks[x].addr = (uintptr_t)ec_ctx->data.buf + i * page_size_k + x * ec_ctx->mem.block_size;
+        //     ec_ctx->mem.data_blocks[x].addr = (uintptr_t)ec_ctx->data.buf + x * ec_ctx->mem.block_size;
+        //     ec_ctx->mem.data_blocks[x].length = ec_ctx->mem.block_size;
+        //     ec_ctx->mem.data_blocks[x].lkey = ec_ctx->data.mr->lkey;
+        // }
+        // for(int x = 0; x < ec_ctx->attr.m; x++){
+        //     // ec_ctx->mem.code_blocks[x].addr = (uintptr_t)ec_ctx->code.buf + i * parity_size_m + x * ec_ctx->mem.block_size;
+        //     ec_ctx->mem.code_blocks[x].addr = (uintptr_t)ec_ctx->code.buf + x * ec_ctx->mem.block_size;
+        //     ec_ctx->mem.code_blocks[x].length = ec_ctx->mem.block_size;
+        //     ec_ctx->mem.code_blocks[x].lkey = ec_ctx->code.mr->lkey;
+        // }
         
 		if (ctx->sw)
 			err = sw_ec_encode(ctx->ec_ctx->data.buf,

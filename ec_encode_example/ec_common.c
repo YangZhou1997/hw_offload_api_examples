@@ -299,20 +299,23 @@ ec_get_sg(struct ec_mr *data,
     int size = sge * bs;
 
 #ifdef USING_HG
-    data->buf = allocate_hugepage_persistent(FILE_SIZE);
+    // data->buf = allocate_hugepage_persistent(FILE_SIZE);
+    data->buf = allocate_hugepage_persistent(size);
 #else
-    data->buf = calloc(1, FILE_SIZE);
+    // data->buf = calloc(1, FILE_SIZE);
+    data->buf = calloc(1, size);
 #endif
-    for(uint64_t i = 0; i < FILE_SIZE; i += 4){
-        *(uint32_t*)&data->buf[i] = rand();
-    }
+    // for(uint64_t i = 0; i < FILE_SIZE; i += 4){
+    //     *(uint32_t*)&data->buf[i] = rand();
+    // }
 
     if (!data->buf) {
         err_log("Failed to allocate data buffer\n");
                 return -ENOMEM;
         }
 
-    data->mr = ibv_reg_mr(pd, data->buf, FILE_SIZE, IBV_ACCESS_LOCAL_WRITE);
+    // data->mr = ibv_reg_mr(pd, data->buf, FILE_SIZE, IBV_ACCESS_LOCAL_WRITE);
+    data->mr = ibv_reg_mr(pd, data->buf, size, IBV_ACCESS_LOCAL_WRITE);
     if (!data->mr) {
         printf("%d", errno);
         err_log("Failed to allocate data MR\n");
@@ -808,7 +811,8 @@ alloc_ec_ctx(struct ibv_pd *pd, int frame_size,
     ctx->attr.max_data_sge = k;
     ctx->attr.max_code_sge = m;
     ctx->attr.affinity_hint = affinity;
-    ctx->block_size = align_any((frame_size + ctx->attr.k - 1) / ctx->attr.k, 64);
+    // ctx->block_size = align_any((frame_size + ctx->attr.k - 1) / ctx->attr.k, 64);
+    ctx->block_size = align_any(frame_size, 64);
 
     if (data_updates) {
         ctx->data_updates_arr = calloc(ctx->attr.k, sizeof(uint8_t));
